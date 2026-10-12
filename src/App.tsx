@@ -1,4 +1,4 @@
-import { useRef, useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import {
   colors,
   STICKERS,
@@ -27,6 +27,11 @@ export default function App({
   const lastErase = useRef<Point | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [draft, setDraft] = useState<Stroke | null>(null);
+  const [pendingStrokes, setPendingStrokes] = useState<Stroke[]>([]);
+  useEffect(() => {
+    const savedIds = new Set(snapshot.items.map(item => item.id));
+    setPendingStrokes(current => current.filter(stroke => !savedIds.has(stroke.id)));
+  }, [snapshot.items]);
   const [selected, setSelected] = useState<string | null>(null);
   const [position, setPosition] = useState<Point | null>(null);
   const activePointer = useRef<number | null>(null);
@@ -144,7 +149,12 @@ export default function App({
     } else if (!cancel) {
       const stroke = strokeRef.current,
         d = drag.current;
-      if (stroke) void run((repo) => repo.create(stroke));
+      if (stroke) {
+        setPendingStrokes(current => [...current, stroke]);
+        void run((repo) => repo.create(stroke)).then(ok => {
+          if (!ok) setPendingStrokes(current => current.filter(item => item.id !== stroke.id));
+        });
+      }
       else if (d)
         void run((repo) =>
           repo.move(d.item.id, d.current.x, d.current.y, d.item.revision),
@@ -316,6 +326,7 @@ export default function App({
               rx={eraseSize / 2 * 1000 / (canvasRef.current?.getBoundingClientRect().width || 1000)}
               ry={eraseSize / 2 * 700 / (canvasRef.current?.getBoundingClientRect().height || 700)}
               fill="#ffffff66" stroke="#955f51" strokeWidth="2" pointerEvents="none" />}
+            {pendingStrokes.filter(stroke => !snapshot.items.some(item => item.id === stroke.id)).map(renderItem)}
             {draft && renderItem(draft)}
           </svg>
         </div>

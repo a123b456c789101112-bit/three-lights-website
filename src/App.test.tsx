@@ -240,3 +240,28 @@ it("拖曳橡皮擦可掃過多筆細線，保留他人作品，取消不刪除"
   fireEvent.pointerUp(canvas,{pointerId:2,clientX:150,clientY:310});
   await waitFor(()=>expect(repo.snapshot.items.map(i=>i.id)).toEqual(["s2"]));
 });
+it("放開手指後保留線條直到雲端快照回來，不閃白也不重複畫", async () => {
+  class TestPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type:string, props:PointerEventInit) { super(type,props); this.pointerId=props.pointerId ?? 1; }
+  }
+  vi.stubGlobal("PointerEvent",TestPointerEvent);
+  const repo=new Repository();
+  let complete:()=>void=()=>{};
+  let saved:NewArtwork|undefined;
+  repo.create=async item=>{ saved=item; await new Promise<void>(resolve=>{complete=resolve;}); };
+  render(<App repository={repo}/>);
+  const canvas=screen.getByLabelText("繪畫畫布");
+  Object.assign(canvas,{setPointerCapture:vi.fn(),hasPointerCapture:()=>false,getBoundingClientRect:()=>({left:0,top:0,width:1000,height:700})});
+  fireEvent.pointerDown(canvas,{pointerId:1,button:0,clientX:10,clientY:20});
+  fireEvent.pointerMove(canvas,{pointerId:1,clientX:30,clientY:40});
+  expect(canvas.querySelectorAll('polyline')).toHaveLength(1);
+  fireEvent.pointerUp(canvas,{pointerId:1,clientX:30,clientY:40});
+  expect(canvas.querySelectorAll('polyline')).toHaveLength(1);
+  complete();
+  await waitFor(()=>expect(screen.queryByText('儲存中…')).toBeNull());
+  expect(canvas.querySelectorAll('polyline')).toHaveLength(1);
+  repo.snapshot.items.push({...saved!,authorId:'me',revision:1});
+  repo.emit();
+  await waitFor(()=>expect(canvas.querySelectorAll('polyline')).toHaveLength(1));
+});
