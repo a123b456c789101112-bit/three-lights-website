@@ -1,74 +1,202 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import App from './App';
-import { isBoard, MAX_IMAGE_BYTES, validateImage } from './model';
-import { loadLocalBoard, saveLocalBoard } from './storage';
-beforeEach(() => localStorage.clear());
-afterEach(cleanup);
-describe('燈光與畫布', () => {
-  it('初始關燈，點亮解鎖工具，再點關閉', async () => {
-    const user = userEvent.setup(); render(<App />);
-    const light = screen.getByRole('button', { name: /暖光/ });
-    expect(light.getAttribute('aria-pressed')).toBe('false');
-    expect(screen.getByRole('group', { name: '畫筆與貼圖工具' }).hasAttribute('disabled')).toBe(true);
-    await user.click(light);
-    expect(light.getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByRole('group', { name: '畫筆與貼圖工具' }).hasAttribute('disabled')).toBe(false);
-    await user.click(light);
-    expect(light.getAttribute('aria-pressed')).toBe('false');
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import App from "./App";
+import {
+  validateImage,
+  MAX_IMAGE_BYTES,
+  type Snapshot,
+  type NewArtwork,
+} from "./model";
+import type { SharedBoardRepository } from "./storage";
+// Unit-test double only. Real Supabase cross-browser coverage is in e2e/shared.spec.ts.
+class Repository implements SharedBoardRepository {
+  snapshot: Snapshot = {
+    userId: "me",
+    items: [],
+    lights: [1, 2, 3].map((id) => ({ id, on: false, revision: 0 })),
+    canUndo: false,
+  };
+  listener = (_: Snapshot) => {};
+  emit() {
+    this.listener({
+      ...this.snapshot,
+      items: [...this.snapshot.items],
+      lights: [...this.snapshot.lights],
+    });
+  }
+  connect(listener: (value: Snapshot) => void) {
+    this.listener = listener;
+    this.emit();
+    return () => {};
+  }
+  async create(item: NewArtwork) {
+    this.snapshot.items.push({ ...item, authorId: "me", revision: 1 });
+    this.snapshot.canUndo = true;
+    this.emit();
+  }
+  async move(id: string, x: number, y: number) {
+    this.snapshot.items = this.snapshot.items.map((i) =>
+      i.id === id && i.kind === "sticker" ? { ...i, x, y } : i,
+    );
+    this.emit();
+  }
+  async remove(id: string) {
+    this.snapshot.items = this.snapshot.items.filter((i) => i.id !== id);
+    this.emit();
+  }
+  async toggleLight(id: number) {
+    this.snapshot.lights = this.snapshot.lights.map((l) =>
+      l.id === id ? { ...l, on: !l.on } : l,
+    );
+    this.emit();
+  }
+  async undo() {
+    this.snapshot.items = this.snapshot.items.filter(
+      (i) => i.authorId !== "me",
+    );
+    this.emit();
+  }
+  async upload() {
+    return "me/image.png";
+  }
+}
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+describe("家庭介面", () => {
+  it("無設定時只顯示短錯誤，不啟用本機假同步或文案", () => {
+    render(<App repository={null} />);
+    expect(screen.getByRole("alert").textContent).toBe("尚未設定共享服務。");
+    expect(
+      screen.getByRole("button", { name: "燈 1" }).hasAttribute("disabled"),
+    ).toBe(true);
+    expect(screen.queryByText(/暖光|THREE LIGHTS|僅此裝置/)).toBeNull();
   });
-  it('貼圖持久保存、鍵盤移動、移除與撤回', async () => {
-    const user = userEvent.setup(); const view = render(<App />);
-    await user.click(screen.getByRole('button', { name: /暖光/ }));
-    await user.click(screen.getByRole('button', { name: '加入 ✿ 貼圖' }));
-    expect(loadLocalBoard().items).toHaveLength(1);
-    fireEvent.keyDown(screen.getByRole('button', { name: '選取 ✿ 貼圖' }), { key: 'ArrowRight' });
-    expect(loadLocalBoard().items[0]).toMatchObject({ x: 510 });
-    view.unmount(); render(<App />);
-    expect(screen.getByRole('button', { name: '選取 ✿ 貼圖' })).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: /月光/ }));
-    await user.click(screen.getByRole('button', { name: '撤回最後一筆' }));
-    expect(loadLocalBoard().items).toHaveLength(0);
+  it("三盞燈各自切換，關燈保留畫布且工具可使用", async () => {
+    const user = userEvent.setup();
+    const repo = new Repository();
+    render(<App repository={repo} />);
+    await user.click(screen.getByRole("button", { name: "燈 1" }));
+    expect(
+      screen.getByRole("button", { name: "燈 1" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("button", { name: "燈 2" }).getAttribute("aria-pressed"),
+    ).toBe("false");
+    await user.click(screen.getByRole("button", { name: "加入 ✿ 貼圖" }));
+    await user.click(screen.getByRole("button", { name: "燈 1" }));
+    expect(screen.getByRole("button", { name: "選取 ✿ 貼圖" })).toBeTruthy();
+    expect(
+      screen
+        .getByRole("group", { name: "畫筆與貼圖工具" })
+        .hasAttribute("disabled"),
+    ).toBe(false);
   });
-  it('觸控畫線儲存、取消不留下筆跡、橡皮擦移除', async () => {
-    class TestPointerEvent extends MouseEvent { pointerId: number; constructor(type: string, props: PointerEventInit) { super(type, props); this.pointerId = props.pointerId ?? 1; } }
-    vi.stubGlobal('PointerEvent', TestPointerEvent);
-    const user = userEvent.setup(); render(<App />);
-    await user.click(screen.getByRole('button', { name: /暖光/ }));
-    const canvas = screen.getByLabelText('繪畫畫布');
-    Object.assign(canvas, { setPointerCapture: vi.fn(), hasPointerCapture: () => false, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 700 }) });
-    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 10, clientY: 20, button: 0 });
+  it("只能移除自己的貼圖", async () => {
+    const repo = new Repository();
+    repo.snapshot.items = [
+      {
+        id: "other",
+        authorId: "other",
+        revision: 1,
+        kind: "sticker",
+        x: 500,
+        y: 350,
+        content: "✿",
+        image: false,
+      },
+    ];
+    render(<App repository={repo} />);
+    fireEvent.focus(screen.getByRole("button", { name: "選取 ✿ 貼圖" }));
+    expect(
+      screen.getByRole("button", { name: "移除" }).hasAttribute("disabled"),
+    ).toBe(true);
+    fireEvent.keyDown(screen.getByRole("button", { name: "選取 ✿ 貼圖" }), {
+      key: "Delete",
+    });
+    expect(repo.snapshot.items).toHaveLength(1);
+  });
+  it("儲存失敗顯示錯誤，不更新燈或宣稱成功", async () => {
+    const repo = new Repository();
+    repo.toggleLight = async () => {
+      throw new Error("連線或儲存失敗，請重試。");
+    };
+    const user = userEvent.setup();
+    render(<App repository={repo} />);
+    await user.click(screen.getByRole("button", { name: "燈 1" }));
+    expect(screen.getByRole("alert").textContent).toContain("儲存失敗");
+    expect(
+      screen.getByRole("button", { name: "燈 1" }).getAttribute("aria-pressed"),
+    ).toBe("false");
+  });
+  it("觸控逐筆新增，取消手勢不寫入", async () => {
+    class TestPointerEvent extends MouseEvent {
+      pointerId: number;
+      constructor(type: string, props: PointerEventInit) {
+        super(type, props);
+        this.pointerId = props.pointerId ?? 1;
+      }
+    }
+    vi.stubGlobal("PointerEvent", TestPointerEvent);
+    const repo = new Repository();
+    render(<App repository={repo} />);
+    const canvas = screen.getByLabelText("繪畫畫布");
+    Object.assign(canvas, {
+      setPointerCapture: vi.fn(),
+      hasPointerCapture: () => false,
+      getBoundingClientRect: () => ({
+        left: 0,
+        top: 0,
+        width: 1000,
+        height: 700,
+      }),
+    });
+    fireEvent.pointerDown(canvas, {
+      pointerId: 1,
+      clientX: 10,
+      clientY: 20,
+      button: 0,
+    });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 30, clientY: 40 });
     fireEvent.pointerUp(canvas, { pointerId: 1 });
-    expect(loadLocalBoard().items[0]).toMatchObject({ kind: 'stroke', points: [{ x: 10, y: 20 }, { x: 30, y: 40 }] });
-    fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 50, clientY: 50, button: 0 });
+    await waitFor(() => expect(repo.snapshot.items).toHaveLength(1));
+    expect(repo.snapshot.items[0]).toMatchObject({
+      kind: "stroke",
+      points: [
+        { x: 10, y: 20 },
+        { x: 30, y: 40 },
+      ],
+    });
+    fireEvent.pointerDown(canvas, {
+      pointerId: 2,
+      clientX: 50,
+      clientY: 50,
+      button: 0,
+    });
     fireEvent.pointerCancel(canvas, { pointerId: 2 });
-    expect(loadLocalBoard().items).toHaveLength(1);
-    await user.click(screen.getByRole('button', { name: /橡皮擦/ }));
-    fireEvent.pointerDown(canvas.querySelector('polyline')!, { pointerId: 3, button: 0 });
-    expect(loadLocalBoard().items).toHaveLength(0);
-    vi.unstubAllGlobals();
-  });
-  it('儲存失敗會顯示錯誤，避免宣稱已儲存', async () => {
-    const user = userEvent.setup(); render(<App />);
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('儲存空間不足'); });
-    await user.click(screen.getByRole('button', { name: /暖光/ }));
-    await user.click(screen.getByRole('button', { name: '加入 ✿ 貼圖' }));
-    expect(screen.getByRole('alert').textContent).toContain('儲存空間不足');
-    expect(screen.queryByRole('button', { name: '選取 ✿ 貼圖' })).toBeNull();
+    expect(repo.snapshot.items).toHaveLength(1);
   });
 });
-describe('資料與圖片限制', () => {
-  it('拒絕 SVG 與超大圖片，接受小 PNG', () => {
-    expect(() => validateImage(new File(['x'], 'x.svg', { type: 'image/svg+xml' }))).toThrow(/PNG/);
-    expect(() => validateImage(new File([new Uint8Array(MAX_IMAGE_BYTES + 1)], 'x.png', { type: 'image/png' }))).toThrow(/1 MB/);
-    expect(() => validateImage(new File(['x'], 'x.png', { type: 'image/png' }))).not.toThrow();
-  });
-  it('驗證持久化資料，拒絕外部圖片 URL 與不合法座標', () => {
-    expect(isBoard({ version: 1, items: [{ id: 'a', kind: 'sticker', image: true, content: 'https://evil.example/image', x: 50, y: 50 }] })).toBe(false);
-    expect(isBoard({ version: 1, items: [{ id: 'a', kind: 'stroke', color: '#62635e', width: 5, points: [{ x: NaN, y: 0 }] }] })).toBe(false);
-    saveLocalBoard({ version: 1, items: [] }); expect(loadLocalBoard().items).toEqual([]);
-    localStorage.setItem('three-lights:board:v1', '{broken'); expect(() => loadLocalBoard()).toThrow();
-  });
+it("拒絕 SVG 與大於 1 MB 的圖片", () => {
+  expect(() =>
+    validateImage(new File(["x"], "x.svg", { type: "image/svg+xml" })),
+  ).toThrow(/PNG/);
+  expect(() =>
+    validateImage(
+      new File([new Uint8Array(MAX_IMAGE_BYTES + 1)], "x.png", {
+        type: "image/png",
+      }),
+    ),
+  ).toThrow(/1 MB/);
+  expect(() =>
+    validateImage(new File(["x"], "x.png", { type: "image/png" })),
+  ).not.toThrow();
 });
