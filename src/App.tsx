@@ -7,6 +7,7 @@ import {
   type Stroke,
 } from "./model";
 import { createRepository, type SharedBoardRepository } from "./storage";
+import { hitsEraser } from "./eraser";
 import { useSharedBoard } from "./useSharedBoard";
 const defaultRepository = createRepository();
 export default function App({
@@ -19,6 +20,12 @@ export default function App({
   const [color, setColor] = useState(colors[0]);
   const [width, setWidth] = useState(5);
   const [eraser, setEraser] = useState(false);
+  const [eraseSize, setEraseSize] = useState(32);
+  const [eraseCursor, setEraseCursor] = useState<Point | null>(null);
+  const [erasedIds, setErasedIds] = useState<Set<string>>(new Set());
+  const erased = useRef(new Map<string, Artwork>());
+  const lastErase = useRef<Point | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
   const [draft, setDraft] = useState<Stroke | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [position, setPosition] = useState<Point | null>(null);
@@ -31,6 +38,7 @@ export default function App({
   } | null>(null);
   const strokeRef = useRef<Stroke | null>(null);
   const input = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<SVGSVGElement>(null);
   // Lights represent bathing status. Turning them off never clears or disables the board.
   const enabled = ready && !busy;
   const owned = (item: Artwork) => item.authorId === snapshot.userId;
@@ -47,6 +55,18 @@ export default function App({
       ),
     };
   }
+  function sweep(e: PointerEvent<SVGSVGElement>) {
+    const p = point(e);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const previous = lastErase.current ?? p;
+    for (const item of snapshot.items) {
+      if (owned(item) && hitsEraser(item, previous, p, eraseSize / 2, rect.width / 1000, rect.height / 700))
+        erased.current.set(item.id, item);
+    }
+    lastErase.current = p;
+    setEraseCursor(p);
+    setErasedIds(new Set(erased.current.keys()));
+  }
   function down(e: PointerEvent<SVGSVGElement>) {
     if (!enabled || activePointer.current !== null || e.button !== 0) return;
     const p = point(e);
@@ -55,8 +75,11 @@ export default function App({
       ?.getAttribute("data-id");
     const item = snapshot.items.find((value) => value.id === id);
     if (eraser) {
-      if (item && owned(item))
-        void run((repo) => repo.remove(item.id, item.revision));
+      activePointer.current = e.pointerId;
+      erased.current.clear();
+      lastErase.current = null;
+      sweep(e);
+      e.currentTarget.setPointerCapture(e.pointerId);
       return;
     }
     if (item?.kind === "sticker") {
@@ -84,7 +107,9 @@ export default function App({
     e.currentTarget.setPointerCapture(e.pointerId);
   }
   function move(e: PointerEvent<SVGSVGElement>) {
+    if (eraser) setEraseCursor(point(e));
     if (activePointer.current !== e.pointerId) return;
+    if (eraser) { sweep(e); return; }
     const p = point(e);
     if (strokeRef.current && strokeRef.current.points.length < 3000) {
       const next = {
@@ -105,7 +130,18 @@ export default function App({
   }
   function finish(e: PointerEvent<SVGSVGElement>, cancel = false) {
     if (activePointer.current !== e.pointerId) return;
-    if (!cancel) {
+    if (eraser) {
+      if (!cancel) {
+        sweep(e);
+        const targets = [...erased.current.values()];
+        if (targets.length) void run(async (repo) => {
+          for (const item of targets) await repo.remove(item.id, item.revision);
+        });
+      }
+      erased.current.clear();
+      lastErase.current = null;
+      setErasedIds(new Set());
+    } else if (!cancel) {
       const stroke = strokeRef.current,
         d = drag.current;
       if (stroke) void run((repo) => repo.create(stroke));
@@ -264,8 +300,10 @@ export default function App({
         )}
         <div className={`canvas-wrap ${enabled ? "enabled" : ""}`}>
           <svg
+            ref={canvasRef}
             aria-label="繪畫畫布"
-            className="canvas"
+            className={`canvas ${eraser ? "erasing" : ""}`}
+            onPointerLeave={() => { if (activePointer.current === null) setEraseCursor(null); }}
             viewBox="0 0 1000 700"
             preserveAspectRatio="none"
             onPointerDown={down}
@@ -273,7 +311,11 @@ export default function App({
             onPointerUp={(e) => finish(e)}
             onPointerCancel={(e) => finish(e, true)}
           >
-            {snapshot.items.map(renderItem)}
+            {snapshot.items.filter(item => !erasedIds.has(item.id)).map(renderItem)}
+            {eraser && eraseCursor && <ellipse cx={eraseCursor.x} cy={eraseCursor.y}
+              rx={eraseSize / 2 * 1000 / (canvasRef.current?.getBoundingClientRect().width || 1000)}
+              ry={eraseSize / 2 * 700 / (canvasRef.current?.getBoundingClientRect().height || 700)}
+              fill="#ffffff66" stroke="#955f51" strokeWidth="2" pointerEvents="none" />}
             {draft && renderItem(draft)}
           </svg>
         </div>
@@ -314,6 +356,7 @@ export default function App({
             >
               橡皮擦
             </button>
+            {eraser && <label className="brush-label">擦除範圍 <input aria-label="橡皮擦大小" type="range" min="16" max="80" value={eraseSize} onChange={e => setEraseSize(Number(e.target.value))} /></label>}
           </div>
           <div className="tool-row stickers">
             <span className="tool-caption">貼圖</span>
@@ -378,8 +421,13 @@ export default function App({
             >
               撤回
             </button>
+            <button className="text-button" disabled={!snapshot.items.length} onClick={() => setConfirmClear(true)}>清空畫布</button>
           </div>
         </fieldset>
+        {confirmClear && <div className="clear-backdrop"><section className="clear-dialog" role="alertdialog" aria-modal="true" aria-labelledby="clear-title" aria-describedby="clear-description" onKeyDown={e => { if (e.key === "Escape") setConfirmClear(false); }}>
+          <h2 id="clear-title">清空畫布？</h2><p id="clear-description">所有人的塗鴉和貼圖都會刪除，無法撤回。燈光狀態會保留。</p>
+          <div className="tool-row"><button className="tool-button" autoFocus onClick={() => setConfirmClear(false)}>取消</button><button className="tool-button" disabled={!enabled} onClick={() => { setConfirmClear(false); void run(repo => repo.clear()); }}>確認清空</button></div>
+        </section></div>}
         {busy && (
           <p role="status" className="status">
             儲存中…
