@@ -63,6 +63,11 @@ class Repository implements SharedBoardRepository {
     );
     this.emit();
   }
+  async clear() {
+    this.snapshot.items = [];
+    this.snapshot.canUndo = false;
+    this.emit();
+  }
   async upload() {
     return "me/image.png";
   }
@@ -199,4 +204,39 @@ it("拒絕 SVG 與大於 1 MB 的圖片", () => {
   expect(() =>
     validateImage(new File(["x"], "x.png", { type: "image/png" })),
   ).not.toThrow();
+});
+
+it("清空須確認，取消保留作品，確認清掉他人作品並保留燈光", async () => {
+  const repo = new Repository();
+  repo.snapshot.items = [{id:"other",authorId:"other",revision:1,kind:"sticker",x:50,y:50,content:"♡",image:false}];
+  repo.snapshot.lights[0].on = true;
+  const user = userEvent.setup(); render(<App repository={repo} />);
+  await user.click(screen.getByRole("button", {name:"清空畫布"}));
+  expect(repo.snapshot.items).toHaveLength(1);
+  await user.click(screen.getByRole("button", {name:"取消"}));
+  expect(repo.snapshot.items).toHaveLength(1);
+  await user.click(screen.getByRole("button", {name:"清空畫布"}));
+  await user.click(screen.getByRole("button", {name:"確認清空"}));
+  expect(repo.snapshot.items).toHaveLength(0);
+  expect(repo.snapshot.lights[0].on).toBe(true);
+});
+it("拖曳橡皮擦可掃過多筆細線，保留他人作品，取消不刪除", async () => {
+  class TestPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type:string, props:PointerEventInit) { super(type,props); this.pointerId=props.pointerId ?? 1; }
+  }
+  vi.stubGlobal("PointerEvent",TestPointerEvent);
+  const repo=new Repository();
+  repo.snapshot.items=[100,200,300].map((y,i)=>({id:`s${i}`,authorId:i===2?"other":"me",revision:1,kind:"stroke" as const,color:"#62635e",width:2,points:[{x:100,y},{x:200,y}]}));
+  render(<App repository={repo}/>);
+  const canvas=screen.getByLabelText("繪畫畫布");
+  Object.assign(canvas,{setPointerCapture:vi.fn(),hasPointerCapture:()=>false,getBoundingClientRect:()=>({left:0,top:0,width:1000,height:700})});
+  fireEvent.click(screen.getByRole("button",{name:"橡皮擦"}));
+  fireEvent.pointerDown(canvas,{pointerId:1,button:0,clientX:150,clientY:110});
+  fireEvent.pointerCancel(canvas,{pointerId:1});
+  expect(repo.snapshot.items).toHaveLength(3);
+  fireEvent.pointerDown(canvas,{pointerId:2,button:0,clientX:150,clientY:110});
+  fireEvent.pointerMove(canvas,{pointerId:2,clientX:150,clientY:310});
+  fireEvent.pointerUp(canvas,{pointerId:2,clientX:150,clientY:310});
+  await waitFor(()=>expect(repo.snapshot.items.map(i=>i.id)).toEqual(["s2"]));
 });

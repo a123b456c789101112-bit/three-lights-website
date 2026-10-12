@@ -15,6 +15,7 @@ export interface SharedBoardRepository {
   remove(id: string, revision: number): Promise<void>;
   toggleLight(id: number): Promise<void>;
   undo(): Promise<void>;
+  clear(): Promise<void>;
   upload(file: File): Promise<string>;
 }
 export const NOT_CONFIGURED = "尚未設定共享服務。";
@@ -232,6 +233,10 @@ export class SupabaseBoardRepository implements SharedBoardRepository {
   }
   async undo() {
     await this.mutate("undo");
+  }
+  async clear() {
+    const result = await this.client.rpc("family_clear");
+    fail(result.error);
   }
   async upload(file: File) {
     const blob = await prepareImage(file);
