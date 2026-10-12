@@ -1,39 +1,69 @@
 export type Point = { x: number; y: number };
-export type Stroke = { id: string; kind: 'stroke'; color: string; width: number; points: Point[] };
-export type Sticker = { id: string; kind: 'sticker'; x: number; y: number; content: string; image: boolean };
-export type Artwork = Stroke | Sticker;
-export type Board = { version: 1; items: Artwork[] };
-export const EMPTY_BOARD: Board = { version: 1, items: [] };
-export const MAX_ITEMS = 150;
+export type Stroke = {
+  id: string;
+  kind: "stroke";
+  color: string;
+  width: number;
+  points: Point[];
+};
+export type Sticker = {
+  id: string;
+  kind: "sticker";
+  x: number;
+  y: number;
+  content: string;
+  image: boolean;
+  url?: string;
+};
+export type Artwork = (Stroke | Sticker) & {
+  authorId: string;
+  revision: number;
+};
+export type NewArtwork = Stroke | Sticker;
+export type Light = { id: number; on: boolean; revision: number };
+export type Snapshot = {
+  items: Artwork[];
+  lights: Light[];
+  userId: string;
+  canUndo: boolean;
+};
+export const STICKERS = ["✿", "☾", "♡", "✦", "☁", "🌿"];
+export const colors = ["#62635e", "#b78376", "#b7a16d", "#799481", "#8297ae"];
 export const MAX_IMAGE_BYTES = 1024 * 1024;
-export const MAX_STORAGE_BYTES = 4 * 1024 * 1024;
-export const STICKERS = ['✿', '☾', '♡', '✦', '☁', '🌿'];
-const colors = ['#62635e', '#b78376', '#b7a16d', '#799481', '#8297ae'];
-export { colors };
-const finite = (n: unknown, max: number) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= max;
-export function isBoard(value: unknown): value is Board {
-  if (!value || typeof value !== 'object') return false;
-  const board = value as Board;
-  return board.version === 1 && Array.isArray(board.items) && board.items.length <= MAX_ITEMS && board.items.every(item => {
-    if (!item || typeof item.id !== 'string' || item.id.length > 100) return false;
-    if (item.kind === 'stroke') return colors.includes(item.color) && finite(item.width, 20) && Array.isArray(item.points) && item.points.length > 0 && item.points.length <= 3000 && item.points.every(p => p && finite(p.x, 1000) && finite(p.y, 700));
-    return item.kind === 'sticker' && finite(item.x, 1000) && finite(item.y, 700) && typeof item.image === 'boolean' && typeof item.content === 'string' && (item.image ? /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(item.content) && item.content.length < MAX_IMAGE_BYTES * 1.4 : STICKERS.includes(item.content));
-  });
-}
 export function validateImage(file: File) {
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) throw new Error('請選擇 PNG、JPEG 或 WebP 圖片。');
-  if (file.size > MAX_IMAGE_BYTES) throw new Error('圖片請小於 1 MB。');
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type))
+    throw new Error("僅支援 PNG、JPEG、WebP。");
+  if (file.size > MAX_IMAGE_BYTES) throw new Error("圖片上限 1 MB。");
 }
-export async function readImage(file: File): Promise<string> {
+// Decode and re-encode: do not upload arbitrary original bytes or retain EXIF metadata.
+export async function prepareImage(file: File): Promise<Blob> {
   validateImage(file);
-  const bitmap = await createImageBitmap(file);
+  let bitmap: ImageBitmap;
   try {
-    if (bitmap.width > 4096 || bitmap.height > 4096) throw new Error('圖片長寬請小於 4096 像素。');
-  } finally { bitmap.close(); }
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error('圖片讀取失敗，請再試一次。'));
-    reader.readAsDataURL(file);
-  });
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new Error("無法讀取圖片。");
+  }
+  try {
+    if (bitmap.width > 4096 || bitmap.height > 4096)
+      throw new Error("圖片尺寸上限 4096 像素。");
+    const scale = Math.min(1, 1024 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("無法讀取圖片。");
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob>((resolve, reject) =>
+      canvas.toBlob(
+        (value) =>
+          value ? resolve(value) : reject(new Error("無法讀取圖片。")),
+        "image/png",
+      ),
+    );
+    if (blob.size > MAX_IMAGE_BYTES) throw new Error("轉換後圖片超過 1 MB。");
+    return blob;
+  } finally {
+    bitmap.close();
+  }
 }
